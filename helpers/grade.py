@@ -58,6 +58,13 @@ PRESETS: dict[str, str] = {
         "curves=master='0/0 0.25/0.22 0.75/0.78 1/1'"
     ),
 
+    # Food / snack-commerce preset — slightly boosted saturation + contrast
+    # for appetite appeal, without shifting hues or looking over-graded.
+    "snack_vivid": (
+        "eq=contrast=1.08:brightness=0.0:saturation=1.12,"
+        "curves=master='0/0 0.25/0.24 0.75/0.76 1/1'"
+    ),
+
     # Flat — no grade. Useful as a sentinel for "skip grading this source".
     "none": "",
 }
@@ -109,7 +116,12 @@ def _sample_frame_stats(
             "-vf", f"fps={fps:.2f},signalstats,metadata=print:file={metadata_path}",
             "-f", "null", "-",
         ]
-        subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        result = subprocess.run(cmd, capture_output=True, text=True, check=False)
+        
+        if result.returncode != 0:
+            print(f"  [warning] ffmpeg analysis failed for {video.name}: {result.stderr[:200]}")
+            # Analysis failed — return neutral defaults (no correction)
+            return {"y_mean": 0.5, "y_std": 0.18, "sat_mean": 0.25}
 
         # Parse signalstats metadata. Signalstats reports values in the NATIVE
         # bit depth of the decoded frame (8-bit → 0-255, 10-bit → 0-1023). We
@@ -171,6 +183,10 @@ def _sample_frame_stats(
             "y_std": y_range / 4.0,  # range ÷ 4 ≈ stddev for normal-ish distributions
             "sat_mean": sat_mean,
         }
+    except Exception as e:
+        print(f"  [warning] frame stats sampling failed for {video.name}: {e}")
+        # Return neutral defaults on any error
+        return {"y_mean": 0.5, "y_std": 0.18, "sat_mean": 0.25}
     finally:
         Path(metadata_path).unlink(missing_ok=True)
 

@@ -132,15 +132,33 @@ def is_hdr_source(video: Path) -> bool:
 
 
 def is_portrait_source(video: Path) -> bool:
-    """Return True if the video's height > width (portrait / vertical)."""
+    """Return True if the video's display height > width (portrait / vertical).
+
+    Honors the rotation side-data from phone footage; storage dimensions alone
+    can lie when the file carries a 90/270-degree display matrix.
+    """
     try:
         out = subprocess.run(
             ["ffprobe", "-v", "error", "-select_streams", "v:0",
-             "-show_entries", "stream=width,height",
-             "-of", "csv=p=0", str(video)],
+             "-show_entries", "stream=width,height:stream_side_data=rotation",
+             "-of", "json", str(video)],
             capture_output=True, text=True, check=True,
         )
-        w, h = map(int, out.stdout.strip().split(","))
+        data = json.loads(out.stdout)
+        stream = data.get("streams", [{}])[0]
+        w = int(stream.get("width", 0))
+        h = int(stream.get("height", 0))
+
+        rotation = 0
+        for sd in stream.get("side_data_list", []):
+            if "rotation" in sd:
+                rotation = int(sd["rotation"])
+                break
+
+        # Swap display dimensions for 90/270-degree rotations.
+        if abs(rotation) in (90, 270):
+            w, h = h, w
+
         return h > w
     except Exception:
         return False
@@ -493,6 +511,44 @@ def apply_loudnorm_two_pass(
 # -------- Final compositing (Rule 1 + Rule 4) -------------------------------
 
 
+def _get_duration(path: Path) -> float:
+    """Return video/audio duration in seconds via ffprobe."""
+    cmd = [
+        "ffprobe", "-v", "error",
+        "-show_entries", "format=duration",
+        "-of", "default=noprint_wrappers=1:nokey=1",
+        str(path),
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+    return float(result.stdout.strip())
+
+
+def replace_audio_track(
+    video_path: Path,
+    audio_path: Path,
+    out_path: Path,
+) -> None:
+    """Replace a video's audio with an external track, padding/trimming to match video length."""
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    video_duration = _get_duration(video_path)
+    af = f"afade=t=in:st=0:d=0.03,apad=whole_dur={video_duration}"
+    cmd = [
+        "ffmpeg", "-y", "-hide_banner", "-nostats",
+        "-i", str(video_path),
+        "-i", str(audio_path),
+        "-map", "0:v:0",
+        "-map", "1:a:0",
+        "-c:v", "copy",
+        "-af", af,
+        "-shortest",
+        "-c:a", "aac", "-b:a", "192k", "-ar", "48000",
+        "-movflags", "+faststart",
+        str(out_path),
+    ]
+    print(f"  replacing audio track → {audio_path.name}")
+    subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+
+
 def build_final_composite(
     base_path: Path,
     overlays: list[dict],
@@ -601,6 +657,12 @@ def main() -> None:
         action="store_true",
         help="Skip audio loudness normalization. Default is on (-14 LUFS, -1 dBTP, LRA 11).",
     )
+    ap.add_argument(
+        "--audio-track",
+        type=Path,
+        default=None,
+        help="Replace the final audio with an external track (trimmed/padded to video length).",
+    )
     args = ap.parse_args()
 
     edl_path = args.edl.resolve()
@@ -610,6 +672,17 @@ def main() -> None:
     edl = json.loads(edl_path.read_text())
     edit_dir = edl_path.parent
     out_path = args.output.resolve()
+
+    # Resolve audio track: CLI flag wins, then EDL field.
+    audio_track_path: Path | None = None
+    if args.audio_track:
+        audio_track_path = args.audio_track.resolve()
+    elif edl.get("audio_track"):
+        audio_track_path = resolve_path(edl["audio_track"], edit_dir)
+
+    if audio_track_path and not audio_track_path.exists():
+        print(f"warning: audio track not found: {audio_track_path}")
+        audio_track_path = None
 
     # 1. Extract per-segment (auto-grade per range if EDL grade is "auto")
     segment_paths = extract_all_segments(
@@ -638,17 +711,33 @@ def main() -> None:
                 print(f"warning: subtitles path in EDL does not exist: {subs_path}")
                 subs_path = None
 
-    # 4. Composite (overlays + subtitles LAST) → intermediate (pre-loudnorm) path
+    # 4. Composite (overlays + subtitles LAST) → intermediate path
     overlays = edl.get("overlays") or []
+    tmp_composite = out_path.with_suffix(".composite.mp4")
+    build_final_composite(base_path, overlays, subs_path, tmp_composite, edit_dir)
+
+    # 5. Optional external audio track replacement
+    current_path = tmp_composite
+    if audio_track_path:
+        tmp_audio = out_path.with_suffix(".audioswap.mp4")
+        replace_audio_track(current_path, audio_track_path, tmp_audio)
+        if current_path != tmp_composite:
+            current_path.unlink(missing_ok=True)
+        current_path = tmp_audio
+
+    # 6. Loudness normalization (or copy if disabled)
     if args.no_loudnorm:
-        # Composite directly to final output
-        build_final_composite(base_path, overlays, subs_path, out_path, edit_dir)
+        if current_path == tmp_composite:
+            # Nothing to do except move composite to final name
+            run(["ffmpeg", "-y", "-i", str(current_path), "-c", "copy", str(out_path)], quiet=True)
+        else:
+            run(["ffmpeg", "-y", "-i", str(current_path), "-c", "copy", str(out_path)], quiet=True)
+            current_path.unlink(missing_ok=True)
+        tmp_composite.unlink(missing_ok=True)
     else:
-        # Composite to a temp file, then run loudnorm → final output
-        tmp_composite = out_path.with_suffix(".prenorm.mp4")
-        build_final_composite(base_path, overlays, subs_path, tmp_composite, edit_dir)
         print("loudness normalization → social-ready (-14 LUFS / -1 dBTP / LRA 11)")
-        apply_loudnorm_two_pass(tmp_composite, out_path, preview=args.draft)
+        apply_loudnorm_two_pass(current_path, out_path, preview=args.draft)
+        current_path.unlink(missing_ok=True)
         tmp_composite.unlink(missing_ok=True)
 
     size_mb = out_path.stat().st_size / (1024 * 1024)
