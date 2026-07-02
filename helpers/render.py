@@ -645,6 +645,11 @@ def main() -> None:
         help="Draft mode: 720p, ultrafast, CRF 28 — cut-point verification only.",
     )
     ap.add_argument(
+        "--build-subtitles",
+        action="store_true",
+        help="Build master.srt from transcripts + EDL offsets before compositing",
+    )
+    ap.add_argument(
         "--no-subtitles",
         action="store_true",
         help="Skip subtitles even if the EDL references one",

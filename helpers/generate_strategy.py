@@ -189,6 +189,40 @@ def load_metadata_sentences(metadata_path: Path) -> list[dict]:
     return sentences
 
 
+def _srt_timestamp(seconds: float) -> str:
+    """Convert seconds to SRT timestamp format (HH:MM:SS,mmm)."""
+    total_ms = int(round(seconds * 1000))
+    h, rem = divmod(total_ms, 3600_000)
+    m, rem = divmod(rem, 60_000)
+    s, ms = divmod(rem, 1000)
+    return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
+
+
+def generate_subtitles_from_metadata(metadata_path: Path, out_path: Path) -> None:
+    """Generate SRT subtitles from TTS metadata JSON, grouped by commas (same as shots)."""
+    # Reuse the same logic as load_metadata_sentences to group by commas
+    sentences = load_metadata_sentences(metadata_path)
+    
+    if not sentences:
+        out_path.write_text("", encoding="utf-8")
+        return
+    
+    # Generate SRT with one cue per shot/sentence
+    srt_lines: list[str] = []
+    for idx, sent in enumerate(sentences, start=1):
+        text = sent["text"]
+        # Strip trailing punctuation for cleaner uppercase look
+        text = text.rstrip(".,!?;:，。！？；：")
+        text = text.upper()
+        
+        srt_lines.append(str(idx))
+        srt_lines.append(f"{_srt_timestamp(sent['start'])} --> {_srt_timestamp(sent['end'])}")
+        srt_lines.append(text)
+        srt_lines.append("")
+    
+    out_path.write_text("\n".join(srt_lines), encoding="utf-8")
+
+
 def build_shots(sentences: list[dict], model: str | None) -> list[dict]:
     """Build shots from sentences with beat and visual prompt."""
     shots = []
@@ -217,11 +251,16 @@ def build_strategy(metadata_path: Path, edit_dir: Path, model: str | None) -> di
     """Build editing strategy from metadata JSON."""
     sentences = load_metadata_sentences(metadata_path)
     total_duration = sentences[-1]["end"] if sentences else 0
+    
+    # Generate subtitles
+    subs_path = edit_dir / "subtitles.srt"
+    generate_subtitles_from_metadata(metadata_path, subs_path)
 
     return {
         "version": 1,
         "source": str(metadata_path.resolve()),
         "total_duration_s": round(total_duration, 3),
+        "subtitles": str(subs_path.resolve()),
         "shots": build_shots(sentences, model),
     }
 
@@ -264,6 +303,7 @@ def main() -> int:
 
     print(f"strategy → {out_path}")
     print(f"summary  → {md_path}")
+    print(f"subtitles → {edit_dir / 'subtitles.srt'}")
     return 0
 
 
