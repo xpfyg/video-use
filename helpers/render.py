@@ -176,7 +176,7 @@ def extract_segment(
     preview: bool = False,
     draft: bool = False,
 ) -> None:
-    """Extract a cut range as its own MP4 with grade + 30ms audio fades baked in.
+    """Extract a cut range as its own MP4 with grade, no audio.
 
     `-ss` before `-i` for fast accurate seeking. Scale to 1080p from 4K.
     Portrait sources (height > width) are scaled by height to preserve orientation.
@@ -202,10 +202,6 @@ def extract_segment(
         vf_parts.append(grade_filter)
     vf = ",".join(vf_parts)
 
-    # 30ms audio fades at both edges (Rule 3) — prevent pops
-    fade_out_start = max(0.0, duration - 0.03)
-    af = f"afade=t=in:st=0:d=0.03,afade=t=out:st={fade_out_start:.3f}:d=0.03"
-
     if draft:
         preset, crf = "ultrafast", "28"
     elif preview:
@@ -219,10 +215,9 @@ def extract_segment(
         "-i", str(source),
         "-t", f"{duration:.3f}",
         "-vf", vf,
-        "-af", af,
         "-c:v", "libx264", "-preset", preset, "-crf", crf,
         "-pix_fmt", "yuv420p", "-r", "24",
-        "-c:a", "aac", "-b:a", "192k", "-ar", "48000",
+        "-an",  # 去掉原素材的音频
         "-movflags", "+faststart",
         str(out_path),
     ]
@@ -531,16 +526,24 @@ def replace_audio_track(
     """Replace a video's audio with an external track, padding/trimming to match video length."""
     out_path.parent.mkdir(parents=True, exist_ok=True)
     video_duration = _get_duration(video_path)
-    af = f"afade=t=in:st=0:d=0.03,apad=whole_dur={video_duration}"
+    fade_out_start = max(0.0, video_duration - 0.03)
+    
+    # 使用 filter_complex: 先淡入淡出，再确保时长匹配
+    filter_complex = (
+        f"[1:a]afade=t=in:st=0:d=0.03,"
+        f"afade=t=out:st={fade_out_start:.3f}:d=0.03,"
+        f"apad=whole_dur={video_duration},"
+        f"atrim=duration={video_duration}[aout]"
+    )
+    
     cmd = [
         "ffmpeg", "-y", "-hide_banner", "-nostats",
         "-i", str(video_path),
         "-i", str(audio_path),
+        "-filter_complex", filter_complex,
         "-map", "0:v:0",
-        "-map", "1:a:0",
+        "-map", "[aout]",
         "-c:v", "copy",
-        "-af", af,
-        "-shortest",
         "-c:a", "aac", "-b:a", "192k", "-ar", "48000",
         "-movflags", "+faststart",
         str(out_path),
@@ -613,10 +616,9 @@ def build_final_composite(
         *inputs,
         "-filter_complex", filter_complex,
         "-map", out_label,
-        "-map", "0:a",
         "-c:v", "libx264", "-preset", "fast", "-crf", "18",
         "-pix_fmt", "yuv420p",
-        "-c:a", "copy",
+        "-an",  # 不输出音频，因为后面会替换
         "-movflags", "+faststart",
         str(out_path),
     ]
@@ -641,11 +643,6 @@ def main() -> None:
         "--draft",
         action="store_true",
         help="Draft mode: 720p, ultrafast, CRF 28 — cut-point verification only.",
-    )
-    ap.add_argument(
-        "--build-subtitles",
-        action="store_true",
-        help="Build master.srt from transcripts + EDL offsets before compositing",
     )
     ap.add_argument(
         "--no-subtitles",
@@ -726,12 +723,23 @@ def main() -> None:
         current_path = tmp_audio
 
     # 6. Loudness normalization (or copy if disabled)
-    if args.no_loudnorm:
-        if current_path == tmp_composite:
-            # Nothing to do except move composite to final name
-            run(["ffmpeg", "-y", "-i", str(current_path), "-c", "copy", str(out_path)], quiet=True)
-        else:
-            run(["ffmpeg", "-y", "-i", str(current_path), "-c", "copy", str(out_path)], quiet=True)
+    # 检查当前视频是否有音频轨道
+    def has_audio(path: Path) -> bool:
+        try:
+            result = subprocess.run(
+                ["ffprobe", "-v", "error", "-select_streams", "a:0", "-show_entries", "stream=codec_name", "-of", "default=noprint_wrappers=1:nokey=1", str(path)],
+                capture_output=True, text=True, check=True
+            )
+            return bool(result.stdout.strip())
+        except Exception:
+            return False
+    
+    has_audio_track = has_audio(current_path)
+    
+    if args.no_loudnorm or not has_audio_track:
+        # 没有音频或跳过归一化，直接复制
+        run(["ffmpeg", "-y", "-i", str(current_path), "-c", "copy", str(out_path)], quiet=True)
+        if current_path != tmp_composite:
             current_path.unlink(missing_ok=True)
         tmp_composite.unlink(missing_ok=True)
     else:

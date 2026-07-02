@@ -197,11 +197,15 @@ def build_shots(sentences: list[dict], model: str | None) -> list[dict]:
             classify_beat_rule(sent["text"]),
             visual_prompt_rule(classify_beat_rule(sent["text"]), sent["text"]),
         )
+        start = round(sent["start"], 3)
+        if i > 0:
+            start = shots[i-1]["end"]
+        end = round(sent["end"], 3)
         shots.append({
             "shot_id": f"S{i+1:02d}",
-            "start": round(sent["start"], 3),
-            "end": round(sent["end"], 3),
-            "duration": round(sent["end"] - sent["start"], 3),
+            "start": start,
+            "end": end,
+            "duration": round(end - start, 3),
             "text": sent["text"],
             "beat": beat,
             "visual_prompt": visual,
