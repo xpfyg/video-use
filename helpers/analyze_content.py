@@ -35,6 +35,7 @@ load_dotenv()
 DEFAULT_MODEL = "mlx-community/Qwen2-VL-2B-Instruct-4bit"
 DEFAULT_OLLAMA_MODEL = "qwen3-vl:8b"
 DEFAULT_OLLAMA_URL = os.getenv("OLLAMA_URL", "")
+OLLAMA_API_KEY = os.getenv("OLLAMA_API_KEY", "")
 WINDOW_SIZE = 3.0  # seconds
 
 WINDOW_PROMPT = """
@@ -141,9 +142,13 @@ def describe_clip_with_ollama(
         ]
     }
     
+    headers = {
+        "Authorization": f"Bearer {OLLAMA_API_KEY}",
+        "Content-Type": "application/json",
+    }
     try:
         print(f"  calling Ollama with {len(img_b64_list)} images...")
-        resp = requests.post(ollama_url, json=payload, timeout=120)
+        resp = requests.post(ollama_url, json=payload,headers=headers)
         resp.raise_for_status()
         res_data = resp.json()
         return res_data["message"]["content"]

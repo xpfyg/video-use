@@ -35,6 +35,7 @@ python helpers/generate_strategy.py test_materials/hubang_beef_sauce_metadata.js
 python helpers/analyze_visual.py test_materials/*.MOV --edit-dir ./edit_test
 
 # 3. 基于本地模型描述素材内容（首次运行后会命中缓存）基于 visual_report.json 在edit-dir 输出 content_report.json 以及 visual_catalog.md
+#对素材分析本身很费时间,这个脚本执行比较费事时间，可能长达十分钟到半小时左右,可检查日志或者后台运行,不要钱轻易判定为超时,每隔几分钟检查是否有文件生成,生成成功且不为空则说明分析完成。
 python helpers/analyze_content.py --edit-dir ./edit_test
 
 # 4. 模型匹配片段 基于 content_report.json 以及 strategy.json 在edit-dir 输出 edl.json
@@ -102,7 +103,7 @@ python helpers/analyze_visual.py <videos...> [选项]
 
 ### 3. analyze_content.py — 内容理解
 
-使用视觉模型描述素材内容，生成自然语言摘要和素材目录。
+使用视觉模型描述素材内容，生成自然语言摘要和素材目录。 对素材分析本身很费时间,这个脚本执行比较费事时间，可能长达十分钟到半小时左右,可检查日志或者后台运行,不要钱轻易判定为超时,每隔几分钟检查是否有文件生成,生成成功且不为空则说明分析完成。
 
 ```
 python helpers/analyze_content.py [选项]
@@ -136,7 +137,6 @@ python helpers/match_shots.py [选项]
 | 参数 | 说明 | 默认值 |
 |------|------|--------|
 | `--edit-dir` | 项目目录（需含 `strategy.json`、`visual_report.json`、`content_report.json`） | `./edit` |
-| `--template` | 策略模板名称 | `default` |
 | `--ark-url` | ARK API 地址 | `https://ark.cn-beijing.volces.com/api/v3/responses` |
 | `--ark-model` | ARK 模型名称 | `ep-20260702134855-4jqlj` |
 | `--grade` | 色彩分级预设 | `auto` |
