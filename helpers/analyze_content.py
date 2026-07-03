@@ -37,6 +37,7 @@ DEFAULT_OLLAMA_MODEL = "qwen3-vl:8b"
 DEFAULT_OLLAMA_URL = os.getenv("OLLAMA_URL", "")
 OLLAMA_API_KEY = os.getenv("OLLAMA_API_KEY", "")
 WINDOW_SIZE = 3.0  # seconds
+OLLAMA_BATCH_SIZE = 3  # 每次 Ollama 处理的图片数量
 
 WINDOW_PROMPT = """
 硬性前置规则（最高优先级，违反无效）：
@@ -69,7 +70,7 @@ OLLAMA_PROMPT = """
 硬性前置规则（最高优先级，违反无效）：
 1.仅描述所有图片里肉眼可见像素内容，绝对禁止推测、联想、脑补、预判后续动作，没出现的动作一律不提；
 2.严格区分远景,中景,近景
-3.如果画面素材不佳,虚焦,无意义的镜头,没有拍摄到商品,标记为废片
+3.如果画面素材不佳,虚焦,无意义的镜头,没有拍摄到食材或者商品本身,直接标记为废片
 4.描述每一秒的画面内容,输出格式,字数≤60字，格式：第几秒+(远景/中景/近景)+ 镜头标签 + 素材质量+ 客观画面描述,不要联想。
 5.输出总结画面内容,给出有废片的时间范围,没有则不用格式：第几秒到第几秒
 镜头标签有如下:
@@ -100,6 +101,8 @@ def describe_clip_with_ollama(
     ollama_url: str = DEFAULT_OLLAMA_URL,
     temperature: float = 0.1,
     max_tokens: int = 512,
+    start_sec: float | None = None,
+    end_sec: float | None = None,
 ) -> str:
     """Run Ollama VLM on all frames of a clip and return description."""
     if not image_paths:
@@ -110,17 +113,18 @@ def describe_clip_with_ollama(
     
     # 构建提示词
     count = len(image_paths)
-    start = 0.0
-    # 从文件名提取最后一个时间
-    end = 0.0
-    try:
-        last_path = image_paths[-1]
-        # 解析文件名如 frame_0013_13.000s.jpg
-        parts = str(last_path.stem).split('_')
-        if len(parts) >= 3:
-            end = float(parts[2].replace('s', ''))
-    except:
-        pass
+    start = start_sec if start_sec is not None else 0.0
+    end = end_sec if end_sec is not None else 0.0
+    if end_sec is None:
+        # 从文件名提取最后一个时间
+        try:
+            last_path = image_paths[-1]
+            # 解析文件名如 frame_0013_13.000s.jpg
+            parts = str(last_path.stem).split('_')
+            if len(parts) >= 3:
+                end = float(parts[2].replace('s', ''))
+        except:
+            pass
     
     prompt = OLLAMA_PROMPT.format(
         count=count,
@@ -268,40 +272,50 @@ def analyze_clip_content(
         return {"clip_name": clip_name, "summary": "", "windows": [], "model": model}
 
     if use_ollama:
-        # 使用 Ollama，一次处理所有图片
-        print(f"  using Ollama mode, processing all {len(frames)} frames...")
-        image_paths = [resolve_path(f["file"], edit_dir) for f in frames]
-        image_paths = [p for p in image_paths if p]
+        # 使用 Ollama，每次处理 OLLAMA_BATCH_SIZE 张图片，避免超时
+        total = len(frames)
+        print(f"  using Ollama mode, {total} frames, batch size={OLLAMA_BATCH_SIZE}...")
         
-        # if image_paths:
-        #     print(f"    image paths: {[str(p) for p in image_paths]}")
-        
-        desc = describe_clip_with_ollama(
-            image_paths, 
-            model, 
-            ollama_url=ollama_url
-        )
-        
-        # Ollama 模式下，创建一个包含所有帧的 window
-        if image_paths:
-            start = 0.0
-            end = frames[-1]["time"] if frames else 0.0
-            enriched_windows = [{
-                "start": round(start, 3),
-                "end": round(end, 3),
+        enriched_windows: list[dict] = []
+        for i in range(0, total, OLLAMA_BATCH_SIZE):
+            batch_frames = frames[i:i+OLLAMA_BATCH_SIZE]
+            image_paths = [resolve_path(f["file"], edit_dir) for f in batch_frames]
+            image_paths = [p for p in image_paths if p]
+            
+            if not image_paths:
+                continue
+            
+            batch_start = batch_frames[0]["time"]
+            batch_end = batch_frames[-1]["time"]
+            batch_num = i // OLLAMA_BATCH_SIZE + 1
+            total_batches = (total + OLLAMA_BATCH_SIZE - 1) // OLLAMA_BATCH_SIZE
+            
+            print(f"  batch {batch_num}/{total_batches}: {len(image_paths)} frames, {batch_start:.1f}s-{batch_end:.1f}s")
+            
+            desc = describe_clip_with_ollama(
+                image_paths,
+                model,
+                ollama_url=ollama_url,
+                start_sec=batch_start,
+                end_sec=batch_end,
+            )
+            
+            enriched_windows.append({
+                "start": round(batch_start, 3),
+                "end": round(batch_end, 3),
                 "description": desc,
-                "frames": [f["time"] for f in frames],
-            }]
-            summary = desc
-        else:
-            enriched_windows = []
-            summary = ""
+                "frames": [f["time"] for f in batch_frames],
+            })
+        
+        summaries = [w["description"] for w in enriched_windows if w.get("description")]
+        summary = " ".join(summaries) if summaries else ""
         
         return {
             "clip_name": clip_name,
             "clip_path": entry.get("file", ""),
             "summary": summary,
-            "windows": enriched_windows
+            "windows": enriched_windows,
+            "use_ollama": True,
         }
     else:
         # 使用原有的 mlx-vlm 窗口模式

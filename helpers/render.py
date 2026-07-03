@@ -48,12 +48,17 @@ except Exception:
 # baseline roughly 30% up from the bottom on any aspect — clear of the UI on
 # every major vertical-video platform. Do not drop this below ~75 without a
 # specific reason.
-SUB_FORCE_STYLE = (
+SUB_FORCE_STYLE_BASE = (
     "FontName=Helvetica,FontSize=18,Bold=1,"
     "PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BackColour=&H00000000,"
     "BorderStyle=1,Outline=2,Shadow=0,"
-    "Alignment=2,MarginV=90"
+    "Alignment=2"
 )
+
+
+def build_sub_style(margin_v: int = 90) -> str:
+    """Return the subtitles force_style string with the given MarginV."""
+    return f"{SUB_FORCE_STYLE_BASE},MarginV={margin_v}"
 
 # -------- Helpers ------------------------------------------------------------
 
@@ -566,6 +571,10 @@ def build_final_composite(
     has_overlays = bool(overlays)
     has_subs = subtitles_path is not None and subtitles_path.exists()
 
+    # 横屏 MarginV=20，竖屏 MarginV=70
+    margin_v = 70 if is_portrait_source(base_path) else 20
+    sub_style = build_sub_style(margin_v)
+
     if not has_overlays and not has_subs:
         # Nothing to do — just rename/copy base to final name
         run(["ffmpeg", "-y", "-i", str(base_path), "-c", "copy", str(out_path)], quiet=True)
@@ -598,7 +607,7 @@ def build_final_composite(
     if has_subs:
         subs_abs = str(subtitles_path.resolve()).replace(":", r"\:").replace("'", r"\'")
         filter_parts.append(
-            f"{current}subtitles='{subs_abs}':force_style='{SUB_FORCE_STYLE}'[outv]"
+            f"{current}subtitles='{subs_abs}':force_style='{sub_style}'[outv]"
         )
         out_label = "[outv]"
     else:

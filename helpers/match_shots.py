@@ -14,8 +14,10 @@ from dotenv import load_dotenv
 # Load .env file
 load_dotenv()
 
-DEFAULT_ARK_MODEL = "ep-20260702134855-4jqlj"
-DEFAULT_ARK_URL = "https://ark.cn-beijing.volces.com/api/v3/responses"
+# DEFAULT_ARK_MODEL = "ep-20260702134855-4jqlj"
+DEFAULT_ARK_MODEL = "deepseek-v4-flash"
+# DEFAULT_ARK_URL = "https://ark.cn-beijing.volces.com/api/v3/responses"
+DEFAULT_ARK_URL = "https://api.deepseek.com/chat/completions"
 ARK_API_KEY = os.getenv("ARK_API_KEY", "")
 
 PLAN_PROMPT = """你是一名专业的零食带货短视频剪辑师。请根据下面的策略模板和候选素材内容，直接生成 EDL (Edit Decision List) 格式的 JSON。
@@ -30,14 +32,17 @@ PLAN_PROMPT = """你是一名专业的零食带货短视频剪辑师。请根据
 【要求】
 1. 输出严格的 JSON 格式，不要有任何额外文字
 2. 不要重复使用类似的素材切片,而是在类似的素材切片挑选质量最好的（非常重要）
-3. 尽量让每个素材都至少出现一次
+3. 尽量让在同素材找切片
 4. 切记不要使素材指定有废片的切片（非常重要）。
 4. 选择画面内容最贴合台词的素材片段（非常重要）
 6. 好的成片要覆盖远景,中景,镜像
 5. 确保所选片段有足够的时长覆盖该镜头
 6. 使用素材的原始文件名作为 source 键
 7. 给每个选择提供合理的 reason
-8. total_duration_s 一定是等于 Strategy 最后一个end时间, 输出的 ranges 中的end-start 的和要等于total_duration_s
+8. total_duration_s 一定是等于 Strategy 最后一个end时间, 输出的 ranges 中的end-start 的和等于total_duration_s
+9. edl.json 的subtitles 是一个 SRT 文件路径，用于生成最终的视频字幕。
+10. 镜头语言尽可能多展示食材本身,比如画面食物富有食欲,饮品气泡,液体流动晃动,食物搅拌,食物混合,特写食物等（非常重要）
+
 
 【输出格式示例】
 {{
@@ -49,7 +54,7 @@ PLAN_PROMPT = """你是一名专业的零食带货短视频剪辑师。请根据
   "ranges": [
     {{
       "source": "C0103",
-      "start": 2.42,
+      "start": 2.42, # 素材内的时间
       "end": 6.85,
       "beat": "HOOK",
       "quote": "这里的零食真的超好吃！",
@@ -66,7 +71,7 @@ PLAN_PROMPT = """你是一名专业的零食带货短视频剪辑师。请根据
   ],
   "grade": "auto",
   "overlays": [],
-  "subtitles": null,
+  "subtitles": "subtitles.srt",
   "total_duration_s": 87.4
 }}
 
@@ -82,49 +87,36 @@ def load_json(path: Path) -> dict | None:
         return None
 
 
-def run_ark_text(prompt: str, model: str, ark_url: str = DEFAULT_ARK_URL, max_tokens: int = 32768) -> str:
-    """Run ARK API model and return the raw generated text."""
+def run_deepseek(prompt: str, model: str, api_url: str = DEFAULT_ARK_URL, max_tokens: int = 32768) -> str:
+    """Run DeepSeek API (OpenAI-compatible) and return the raw generated text."""
     payload = {
         "model": model,
         "stream": False,
-        "max_output_tokens": max_tokens,
-        "input": [
+        "max_tokens": max_tokens,
+        "messages": [
             {
                 "role": "user",
-                "content": [
-                    {
-                        "type": "input_text",
-                        "text": prompt.strip()
-                    }
-                ]
+                "content": prompt.strip()
             }
         ]
     }
-   
+
     headers = {
         "Authorization": f"Bearer {ARK_API_KEY}",
         "Content-Type": "application/json",
     }
-    
+
     try:
-        print("[ark] calling model...")
-        resp = requests.post(ark_url, json=payload, headers=headers)
+        print("[deepseek] calling model...")
+        resp = requests.post(api_url, json=payload, headers=headers)
         resp.raise_for_status()
         res_data = resp.json()
-        
-        # Find the message output and extract text
-        for output_item in res_data.get("output", []):
-            if output_item.get("type") == "message" and output_item.get("role") == "assistant":
-                for content_item in output_item.get("content", []):
-                    if content_item.get("type") == "output_text":
-                        return content_item.get("text", "").strip()
-        
-        return ""
+        return res_data["choices"][0]["message"]["content"].strip()
     except Exception as e:
-        print(f"[ark] error: {e}")
+        print(f"[deepseek] error: {e}")
         if 'resp' in locals():
-            print(f"[ark] response status: {resp.status_code}")
-            print(f"[ark] response: {resp.text}")
+            print(f"[deepseek] response status: {resp.status_code}")
+            print(f"[deepseek] response: {resp.text}")
         return ""
 
 
@@ -180,8 +172,8 @@ def main() -> int:
         content_report=json.dumps(content_report, indent=2, ensure_ascii=False)
     )
 
-    # Get response from ARK
-    response = run_ark_text(prompt, args.ark_model, args.ark_url, max_tokens=32768)
+    # Get response from DeepSeek
+    response = run_deepseek(prompt, args.ark_model, args.ark_url, max_tokens=32768)
     if not response:
         print("error: no response from model")
         return 1
