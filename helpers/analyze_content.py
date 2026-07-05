@@ -424,15 +424,11 @@ def main() -> int:
 
     for clip_name, entry in visual_report.get("clips", {}).items():
         cached = existing_clips.get(clip_name)
-        cached_model = (cached or {}).get("model")
-        cached_use_ollama = (cached or {}).get("use_ollama", False)
         
         # Check if cache is valid
         cache_valid = (
             not args.force 
             and cached 
-            and cached_model == model 
-            and cached_use_ollama == args.use_ollama
         )
         if not args.use_ollama:
             cached_window_size = (cached or {}).get("window_size")
