@@ -88,9 +88,19 @@ def extract_frames(
     sample_fps: float,
     max_size: int,
 ) -> tuple[list[np.ndarray], list[float]]:
-    """Extract frames at ``sample_fps`` downscaled so longest edge <= max_size."""
+    """Extract frames at ``sample_fps`` downscaled so longest edge <= max_size.
+
+    Total frames are capped at 10 per video. For long videos the effective
+    sampling rate is lowered automatically so we never exceed the cap.
+    """
     info = get_video_info(video_path)
     duration = info["duration"]
+
+    # Short videos keep the requested rate; long videos are throttled so
+    # the total frame count never exceeds 10.
+    max_frames = 10
+    if duration > 0 and duration * sample_fps > max_frames:
+        sample_fps = max_frames / duration
 
     with tempfile.TemporaryDirectory() as tmpdir:
         tmp_path = Path(tmpdir)
