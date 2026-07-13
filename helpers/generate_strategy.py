@@ -325,8 +325,12 @@ def load_metadata_sentences(metadata_path: Path) -> list[dict]:
                 segment_words.append(word)
         
         if segment_words:
+            startTime = float(segment_words[0].get("startTime", 0))
+            if len(sentences) == 0:
+                startTime = 0
+
             sentences.append({
-                "start": float(segment_words[0].get("startTime", 0)),
+                "start": startTime,
                 "end": float(segment_words[-1].get("endTime", 0)),
                 "text": segment_text,
             })

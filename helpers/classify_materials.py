@@ -4,7 +4,8 @@
 本脚本服务于「带货短视频」素材动作分类工作流（默认以冷饮为例，标签可由 labels.json 按大分类配置）：
 1. 遍历中间产物目录的 cache（默认 ``<edit-dir>/cache/frames/<素材>/``），
    每个素材目录对应一条原始拍摄素材（clip）。
-2. 对每个素材目录**抽取 N 张代表性图片**（默认 3 张，按时间轴均匀取样），
+2. 对每个素材目录**抽取 N 张代表性图片**（默认最多 6 张，按视频时长缩放：
+   2–6 张，时长约每 5 秒 +1 张），按时间轴均匀取样，
    拷贝到 ``<cache>/selected/<素材>/`` 便于人工复核。
 3. 将这 N 张图发给 Ollama 视觉模型（默认 ``qwen3-vl:8b``），
    让其从给定动作标签里**选一个**作为该素材的分类标签。
@@ -180,6 +181,20 @@ def extract_frames_from_video(video: Path, n: int, out_dir: Path) -> list[Path]:
         if dst.exists():
             saved.append(dst)
     return saved
+
+
+def frames_for_duration(duration: float | None, cap: int) -> int:
+    """按视频时长缩放每素材取帧数：约每 5 秒 +1 张，夹取到 [2, cap]。
+
+    - 极短视频（<5s）→ 2 张
+    - 10s → 3 张；18s → 4 张；30s → 6 张
+    - 长视频封顶 cap（默认 6）
+    """
+    cap = max(2, int(cap))
+    if not duration or duration <= 0:
+        return cap
+    n = int(duration // 5) + 1
+    return max(2, min(cap, n))
 
 
 def copy_selected(srcs: list[Path], selected_dir: Path, material: str) -> list[dict]:
@@ -401,6 +416,15 @@ def load_existing(output: Path) -> dict:
     return {}
 
 
+def load_json(path: Path) -> dict | None:
+    if not path.exists():
+        return None
+    try:
+        return json.loads(Path(path).read_text(encoding="utf-8"))
+    except Exception:
+        return None
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="素材动作分类标签生成（Ollama 视觉模型）")
     ap.add_argument("--edit-dir", type=Path, default=Path("./edit"), help="中间产物目录")
@@ -410,7 +434,7 @@ def main() -> int:
     ap.add_argument("--output", type=Path, default=None, help="标签 JSON 输出（默认 <edit-dir>/material_labels.json）")
     ap.add_argument("--output-md", type=Path, default=None, help="标签 MD 输出（默认 <edit-dir>/material_labels.md）")
     ap.add_argument("--selected-dir", type=Path, default=None, help="选中帧拷贝目录（默认 <cache>/selected）")
-    ap.add_argument("--num-frames", type=int, default=3, help="每素材抽取图片数")
+    ap.add_argument("--num-frames", type=int, default=6, help="每素材最多抽取图片数（实际按视频时长缩放为 2–6 张）")
     ap.add_argument("--model", default=DEFAULT_MODEL, help="Ollama 视觉模型")
     ap.add_argument("--ollama-url", default=DEFAULT_OLLAMA_URL, help="Ollama API 地址")
     ap.add_argument("--ollama-api-key", default=DEFAULT_OLLAMA_API_KEY, help="Ollama API Key")
@@ -446,6 +470,12 @@ def main() -> int:
         print(f"[warn] 在 {frames_root} 下未找到任何素材目录")
         return 1
 
+    # 读取 visual_report 获取每素材时长，用于按时长缩放取帧数
+    vr_clips = {}
+    vr = load_json(edit_dir / "visual_report.json")
+    if isinstance(vr, dict):
+        vr_clips = vr.get("clips", {})
+
     results: dict[str, dict] = {}
     # 保留已有但本次未覆盖的条目（避免 --force 之外误删）
     for name, entry in existing_materials.items():
@@ -461,12 +491,15 @@ def main() -> int:
                 print(f"[cache] {name} → {prev.get('label')}")
                 continue
 
+        dur = (vr_clips.get(name, {}) or {}).get("duration")
+        n = frames_for_duration(dur, args.num_frames)
+
         images = gather_images(mdir)
         if not images:
             video = find_video(mdir)
             if video:
-                print(f"[extract] {name} 从视频抽帧")
-                images = extract_frames_from_video(video, args.num_frames, selected_dir / name)
+                print(f"[extract] {name} 从视频抽帧（时长 {dur}s → 取 {n} 张）")
+                images = extract_frames_from_video(video, n, selected_dir / name)
             if not images:
                 print(f"[skip] {name} 无图片也无视频")
                 results[name] = {
@@ -475,9 +508,9 @@ def main() -> int:
                 }
                 continue
 
-        selected = select_representative(images, args.num_frames)
+        selected = select_representative(images, n)
         frame_records = copy_selected(selected, selected_dir, name)
-        print(f"[frames] {name}: 从 {len(images)} 张中取 {len(selected)} 张")
+        print(f"[frames] {name}: 时长 {dur}s → 从 {len(images)} 张中取 {len(selected)} 张")
 
         if args.dry_run:
             results[name] = {

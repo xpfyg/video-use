@@ -5,19 +5,20 @@ description: 通过对话编辑任意视频。针对使用 byte-dance TTS metada
 
 ## 工作流程
 
-本技能采用**5步流水线**处理视频素材：
+本技能采用**5步流水线**处理视频素材（Web 控制台 `剪辑合集/web/` 另含「配音」前置步骤）：
 
-1. **策略生成** - 根据音频 metadata 生成多个剪辑策略模板
+1. **策略生成** - 根据音频 metadata 生成剪辑策略（含每镜头 visual_prompt：产品展示/食物展示）
 2. **视觉分析** - 抽帧并分析每条素材的视觉质量指标
-3. **内容理解** - 使用视觉模型描述素材内容，生成素材目录
-4. **片段匹配** - AI 根据内容描述和策略自动匹配合适的视频片段
+3. **素材分类** - 从每条素材抽取关键帧（按视频时长 2–6 张），用视觉模型打动作标签 → material_labels.json
+4. **片段匹配（确定性）** - 基于 strategy 的镜头结构与 material_labels 的「好切片」锚点，**本地确定性**选出每段切片并组装 EDL（无需大模型、无需内容理解）
 5. **渲染成片** - 生成最终视频并烧录字幕
 
 **物料流：**
 ```
-TTS metadata ──> strategy.json ──> match_shots.py ──> edl.json
-                                              ↑
-视频素材 ──> visual_report.json ──> content_report.json ──┘
+TTS metadata ──> strategy.json ─┐
+                                ├─> generate_edl.py ──> edl.json
+视频素材 ──> visual_report.json ─┤
+源视频关键帧 ──> material_labels.json ─┘
 ```
 
 **素材：**
@@ -32,7 +33,7 @@ TTS metadata ──> strategy.json ──> match_shots.py ──> edl.json
 各步骤对应检查文件：
 - 步骤1：`edit-dir/strategy.json` 或 `edit-dir/strategy.md`
 - 步骤2：`edit-dir/visual_report.json`
-- 步骤3：`edit-dir/content_report.json` 或 `edit-dir/visual_catalog.md`
+- 步骤3：`edit-dir/material_labels.json`
 - 步骤4：`edit-dir/edl.json`
 - 步骤5：`edit-dir/final.mp4`
 
@@ -43,15 +44,15 @@ python helpers/generate_strategy.py test_materials/hubang_beef_sauce_metadata.js
 # 2. 抽帧以及视觉质量分析（如 visual_report.json 已存在则跳过）基于视频素材 在edit-dir 输出 visual_report.json
 python helpers/analyze_visual.py test_materials/*.MOV --edit-dir ./edit_test
 
-# 3. 基于本地模型描述素材内容（如 content_report.json 已存在则跳过）基于 visual_report.json 在edit-dir 输出 content_report.json 以及 visual_catalog.md
-# 对素材分析本身很费时间,这个脚本执行比较费事时间，可能长达十分钟到半小时左右,可检查日志或者后台运行,不要钱轻易判定为超时,每隔几分钟检查是否有文件生成,生成成功且不为空则说明分析完成。
-python helpers/analyze_content.py --edit-dir ./edit_test
+# 3. 素材分类（抽 2–6 张关键帧 + 视觉模型打动作标签，如 material_labels.json 已存在则跳过）
+python helpers/classify_materials.py --edit-dir ./edit_test --category 冷饮
 
-# 4. 模型匹配片段（如 edl.json 已存在则跳过）基于 content_report.json 以及 strategy.json 在edit-dir 输出 edl.json
-python helpers/match_shots.py --edit-dir ./edit_test 
+# 4. 确定性生成 EDL（无大模型；如 edl.json 已存在则跳过）
+#    基于 strategy 镜头结构 + material_labels 的好切片锚点，本地轮询选片组装 EDL
+python helpers/generate_edl.py --edit-dir ./edit_test --grade snack_vivid
 
 # 5. 渲染成片（如 final.mp4 已存在则跳过）基于 edl.json 以及音频文件 在edit-dir 输出 final.mp4
-python helpers/render.py edit_test/edl_hubang.json -o edit_test/final.mp4 \
+python helpers/render.py edit_test/edl.json -o edit_test/final.mp4 \
   --audio-track test_materials/hubang_beef_sauce.mp3
 ```
 
@@ -59,7 +60,7 @@ python helpers/render.py edit_test/edl_hubang.json -o edit_test/final.mp4 \
 - `edit_test/strategy.json` / `strategy.md` —— 剪辑策略
 - `edit_test/subtitles.srt` —— 字幕文件（按逗号分组，每个镜头一条字幕）
 - `edit_test/visual_report.json` —— 每条素材的 CV 质量指标
-- `edit_test/content_report.json` —— VLM 生成的素材内容描述
+- `edit_test/material_labels.json` —— 每条素材的动作标签 + 关键帧（好切片锚点）
 - `edit_test/visual_catalog.md` —— 给 LLM/人工复核的素材文档
 - `edit_test/edl.json` —— 剪辑决策
 - `edit_test/final.mp4` —— 最终成片
@@ -110,7 +111,9 @@ python helpers/analyze_visual.py <videos...> [选项]
 
 ---
 
-### 3. analyze_content.py — 内容理解
+### 3. analyze_content.py — 内容理解（可选 / 旧流程）
+
+> ⚠️ 默认流水线已**不再需要**此步骤。确定性匹配器 `generate_edl.py` 仅依赖分类帧锚点，不读 `content_report.json`。此脚本仅在需要 LLM 语义描述素材时选用。
 
 使用视觉模型描述素材内容，生成自然语言摘要和素材目录。 对素材分析本身很费时间,这个脚本执行比较费事时间，可能长达十分钟到半小时左右,可检查日志或者后台运行,不要钱轻易判定为超时,每隔几分钟检查是否有文件生成,生成成功且不为空则说明分析完成。
 
@@ -135,7 +138,9 @@ python helpers/analyze_content.py [选项]
 
 ---
 
-### 4. match_shots.py — 片段匹配
+### 4. match_shots.py — 片段匹配（可选 / 旧 LLM 流程）
+
+> ⚠️ 默认流水线已改用 `generate_edl.py`（确定性、无大模型）。此脚本为可选 LLM 匹配器，需 Ollama/ARK 与 `content_report.json`。
 
 根据策略模板和素材内容描述，通过 ARK API 自动生成 EDL。
 
@@ -208,7 +213,7 @@ python helpers/render.py <edl.json> [选项]
 
 ### 6. classify_materials.py — 素材动作分类标签
 
-对中间产物目录 `cache/frames/<素材>/` 下的每个素材目录，抽取 N 张代表性图片（默认 3 张，按时间轴均匀取样），发给 Ollama 视觉模型（默认 `qwen3-vl:8b`），让其从给定动作标签里**选一个**作为该素材分类标签，最终生成机器可读的 `material_labels.json` 与人工可读的 `material_labels.md`。
+对中间产物目录 `cache/frames/<素材>/` 下的每个素材目录，抽取 N 张代表性图片（**默认最多 6 张，按视频时长缩放为 2–6 张**：约每 5 秒 +1 张），发给 Ollama 视觉模型（默认 `qwen3-vl:8b`），让其从给定动作标签里**选一个**作为该素材分类标签，最终生成机器可读的 `material_labels.json` 与人工可读的 `material_labels.md`。
 
 帧布局与 `analyze_visual.py` 保持一致（`frame_0000_<t>s.jpg`），抽出的帧会拷贝到 `cache/selected/<素材>/` 便于复核。
 
@@ -230,7 +235,7 @@ python helpers/classify_materials.py --edit-dir ./edit --force
 | `--materials-dir` | 直接指定素材目录根（覆盖 frames-root） | 无 |
 | `--output` | 标签 JSON 输出 | `<edit-dir>/material_labels.json` |
 | `--output-md` | 标签 MD 输出 | `<edit-dir>/material_labels.md` |
-| `--num-frames` | 每素材抽取图片数 | `3` |
+| `--num-frames` | 每素材最多抽取图片数（实际按视频时长缩放为 2–6 张） | `6` |
 | `--model` | Ollama 视觉模型 | `qwen3-vl:8b` |
 | `--ollama-url` | Ollama API 地址 | 从 `.env` 的 `OLLAMA_URL` 读取 |
 | `--ollama-api-key` | Ollama API Key | 从 `.env` 的 `OLLAMA_API_KEY` 读取 |
@@ -249,9 +254,33 @@ python helpers/classify_materials.py --edit-dir ./edit --force
 
 ---
 
+### 7. generate_edl.py — 确定性 EDL 生成（默认匹配器，无大模型）
+
+替代 `match_shots.py` 的 LLM 选片：不调用任何大模型，也不依赖 `content_report.json`。
+基于 `strategy.json`（每镜头 `visual_prompt` 的「产品展示/食物展示」判断类别）、
+`visual_report.json`（源视频路径与时长）、`material_labels.json`（动作标签 + selected_frames 好切片锚点），
+本地把每个镜头分配到对应类别素材池并**轮询选素材 + 轮询选锚点**，组装出 `edl.json`。
+后续仍可用「一键优化 / 精剪台」对单个镜头手工替换切片。
+
+```
+python helpers/generate_edl.py --edit-dir ./edit --grade snack_vivid
+```
+
+| 参数 | 说明 | 默认值 |
+|------|------|--------|
+| `--edit-dir` | 中间产物目录 | `./edit` |
+| `--grade` | 调色预设 | `auto` |
+| `--audio-track` | 外部配音文件 | 无 |
+| `-o` | EDL 输出路径 | `<edit-dir>/edl.json` |
+| `--force` | 强制重新生成 | 关闭 |
+
+> 注：`match_shots.py` 仍保留作为可选的 LLM 匹配器（需 Ollama/ARK 与 `content_report.json`），但默认流水线已改用 `generate_edl.py`。
+
+---
+
 ## 调色使用指南
 
-调色通过在 EDL (`edl.json`) 中设置 `grade` 字段控制，支持三种方式。`match_shots.py` 生成 EDL 时可通过 `--grade` 参数指定默认值。
+调色通过在 EDL (`edl.json`) 中设置 `grade` 字段控制，支持三种方式。`generate_edl.py` 生成 EDL 时可通过 `--grade` 参数指定默认值。
 
 ### 预设名称
 

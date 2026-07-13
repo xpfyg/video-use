@@ -180,6 +180,7 @@ def extract_segment(
     out_path: Path,
     preview: bool = False,
     draft: bool = False,
+    fps: int = 60,
 ) -> None:
     """Extract a cut range as its own MP4 with grade, no audio.
 
@@ -221,7 +222,7 @@ def extract_segment(
         "-t", f"{duration:.3f}",
         "-vf", vf,
         "-c:v", "libx264", "-preset", preset, "-crf", crf,
-        "-pix_fmt", "yuv420p", "-r", "24",
+        "-pix_fmt", "yuv420p", "-r", str(fps),
         "-an",  # 去掉原素材的音频
         "-movflags", "+faststart",
         str(out_path),
@@ -234,6 +235,7 @@ def extract_all_segments(
     edit_dir: Path,
     preview: bool,
     draft: bool = False,
+    fps: int = 60,
 ) -> list[Path]:
     """Extract every EDL range into edit_dir/clips_graded/seg_NN.mp4.
     Returns the ordered list of segment paths.
@@ -273,7 +275,7 @@ def extract_all_segments(
         print(f"  [{i:02d}] {src_name}  {start:7.2f}-{end:7.2f}  ({duration:5.2f}s)  {note}")
         if is_auto:
             print(f"        grade: {seg_filter or '(none)'}")
-        extract_segment(src_path, start, duration, seg_filter, out_path, preview=preview, draft=draft)
+        extract_segment(src_path, start, duration, seg_filter, out_path, preview=preview, draft=draft, fps=fps)
         seg_paths.append(out_path)
 
     return seg_paths
@@ -674,6 +676,14 @@ def main() -> None:
         default=None,
         help="Replace the final audio with an external track (trimmed/padded to video length).",
     )
+    ap.add_argument(
+        "--fps",
+        type=int,
+        choices=[24, 30, 60],
+        default=60,
+        help="Output frame rate of extracted segments. Source is usually 60fps; "
+             "pick 30 for a lighter platform-native file, 60 to keep all frames.",
+    )
     args = ap.parse_args()
 
     edl_path = args.edl.resolve()
@@ -697,7 +707,7 @@ def main() -> None:
 
     # 1. Extract per-segment (auto-grade per range if EDL grade is "auto")
     segment_paths = extract_all_segments(
-        edl, edit_dir, preview=args.preview, draft=args.draft
+        edl, edit_dir, preview=args.preview, draft=args.draft, fps=args.fps
     )
 
     # 2. Concat → base
